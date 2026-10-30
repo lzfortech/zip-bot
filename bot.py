@@ -288,7 +288,6 @@ async def cmd_start(message: Message, state: FSMContext):
         "• AES-256 kuchli parol bilan himoyalash\n"
         "• Siqish darajasini tanlash (Tezkor / Standart / Maksimal LZMA)\n"
         "• Katta arxivlarni bo'laklarga (Split) bo'lish\n"
-        "• Tayyor <code>.zip</code> fayllarni ochib (Unzip qilib) berish\n\n"
         "📥 <i>Boshlash uchun menga istalgan fayl, rasm yoki video yuboring!</i>",
         parse_mode="HTML"
     )

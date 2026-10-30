@@ -141,7 +141,7 @@ def get_main_panel_kb(sess: UserSession) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=f"✂️ Bo'lish: {split_text}", callback_data="toggle_split")
         ],
         [
-            InlineKeyboardButton(text="📋 Fayllarni boshqarish", callback_data="manage_files"),
+            InlineKeyboardButton(text="📋 Fayllarni boşqariş", callback_data="manage_files"),
             InlineKeyboardButton(text="🗑 Tozalash", callback_data="clear_all")
         ]
     ]
@@ -171,15 +171,15 @@ def render_panel_text(sess: UserSession) -> str:
         files_preview += f"\n  <i>...va yana {len(sess.files) - 10} ta fayl</i>"
 
     return (
-        f"🗂 <b>Arxivlash paneli</b>\n\n"
-        f"📥 <b>Yig'ilgan fayllar:</b> {len(sess.files)} ta\n"
+        f"🗂 <b>Arxivlaş paneli</b>\n\n"
+        f"📥 <b>Yiğilgan fayllar:</b> {len(sess.files)} ta\n"
         f"💾 <b>Umumiy hajm:</b> {format_size(sess.total_size)}\n"
         f"🏷 <b>Arxiv nomi:</b> <code>{sess.archive_name or 'Avtomatik'}</code>\n"
-        f"🔐 <b>Parol (AES-256):</b> {'O‘rnatilgan ✅' if sess.password else 'Yo‘q ❌'}\n"
-        f"🗜 <b>Siqish usuli:</b> {comp_names[sess.compression]}\n"
-        f"✂️ <b>Bo'laklash (Split):</b> {f'{sess.split_size_mb} MB dan' if sess.split_size_mb else 'Yo‘q'}\n\n"
-        f"<b>Fayllar ro'yxati:</b>\n{files_preview}\n\n"
-        f"<i>Yana fayl yuborishingiz yoki quyidagi tugmalar orqali sozlab arxivlashingiz mumkin:</i>"
+        f"🔐 <b>Parol (AES-256):</b> {'Oʻrnatilgan ✅' if sess.password else 'Yo‘q ❌'}\n"
+        f"🗜 <b>Siqiş usuli:</b> {comp_names[sess.compression]}\n"
+        f"✂️ <b>Bölaklaş (Split):</b> {f'{sess.split_size_mb} MB dan' if sess.split_size_mb else 'Yo‘q'}\n\n"
+        f"<b>Fayllar röyxati:</b>\n{files_preview}\n\n"
+        f"<i>Yana fayl yuborişingiz yoki quyidagi tugmalar orqali sozlab arxivlaşingiz mumkin:</i>"
     )
 
 
@@ -284,11 +284,11 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(
         "👋 <b>Assalomu alaykum! Men professional ZIP Arxivator botman.</b>\n\n"
         "🚀 <b>Imkoniyatlarim:</b>\n"
-        "• Ko'p fayllarni va albomlarni bitta ZIP ga yig'ish (500 MB gacha)\n"
-        "• AES-256 kuchli parol bilan himoyalash\n"
-        "• Siqish darajasini tanlash (Tezkor / Standart / Maksimal LZMA)\n"
-        "• Katta arxivlarni bo'laklarga (Split) bo'lish\n\n"
-        "📥 <i>Boshlash uchun menga istalgan fayl, rasm yoki video yuboring!</i>",
+        "• Köp fayllarni va albomlarni bitta ZIP ga yiğiş (500 MB gaça)\n"
+        "• AES-256 kuçli parol bilan himoyalaş\n"
+        "• Siqiş darajasini tanlaş (Tezkor / Standart / Maksimal LZMA)\n"
+        "• Katta arxivlarni bölaklarga (Split) böliş\n\n"
+        "📥 <i>Boshlaş uchun menga istalgan fayl, rasm yoki video yuboring!</i>",
         parse_mode="HTML"
     )
 
@@ -297,7 +297,7 @@ async def cmd_start(message: Message, state: FSMContext):
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     clear_session(message.from_user.id)
-    await message.answer("🧹 Barcha yig'ilgan fayllar va jarayonlar bekor qilindi.")
+    await message.answer("🧹 Barcha yiğilgan fayllar va jarayonlar bekor qilindi.")
 
 
 # --------- FSM: Arxiv nomini va parolini kiritish ---------
@@ -346,12 +346,12 @@ async def handle_incoming_files(message: Message, bot: Bot, album: Optional[List
         doc = message.document
         if doc.file_name and doc.file_name.lower().endswith(".zip"):
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📂 Ichini ochish (Unzip)", callback_data=f"unzip_init:{doc.file_id}")],
-                [InlineKeyboardButton(text="➕ Yangi ZIP ichiga qo'shish", callback_data="add_zip_as_file")]
+                [InlineKeyboardButton(text="📂 Içini oçiş (Unzip)", callback_data=f"unzip_init:{doc.file_id}")],
+                [InlineKeyboardButton(text="➕ Yangi ZIP içiga qöşiş", callback_data="add_zip_as_file")]
             ])
             # Faylni vaqtincha saqlab turamiz
             temp_path = sess.user_dir / doc.file_name
-            wait_msg = await message.answer("⏳ <i>ZIP fayl tekshirilmoqda...</i>", parse_mode="HTML")
+            wait_msg = await message.answer("⏳ <i>ZIP fayl tekşirilmoqda...</i>", parse_mode="HTML")
             await download_telegram_file(bot, doc.file_id, temp_path)
             sess.files.append(FileItem(doc.file_id, doc.file_name, doc.file_size, temp_path))
             await wait_msg.edit_text(
@@ -375,7 +375,7 @@ async def handle_incoming_files(message: Message, bot: Bot, album: Optional[List
             sess.files.append(FileItem(file_id=f_id, file_name=f_name, file_size=f_size, local_path=local_dest))
         except Exception as e:
             logger.error(f"Fayl yuklashda xatolik: {e}")
-            await message.answer(f"⚠️ <code>{f_name}</code> yuklashda xatolik yuz berdi.", parse_mode="HTML")
+            await message.answer(f"⚠️ <code>{f_name}</code> yuklaşda xatolik yuz berdi.", parse_mode="HTML")
 
     await status_msg.delete()
 
@@ -442,8 +442,8 @@ async def cb_set_name(call: CallbackQuery, state: FSMContext):
 async def cb_set_pwd(call: CallbackQuery, state: FSMContext):
     await state.set_state(BotStates.waiting_for_password)
     await call.message.answer(
-        "🔑 Arxiv uchun parol yozib yuboring (AES-256 shifrlash).\n"
-        "<i>Parolni olib tashlash uchun /off deb yozing:</i>",
+        "🔑 Arxiv uchun parol yozib yuboring (AES-256 şifrlaş).\n"
+        "<i>Parolni olib taşlaş uchun /off deb yozing:</i>",
         parse_mode="HTML"
     )
     await call.answer()
@@ -455,7 +455,7 @@ async def cb_manage_files(call: CallbackQuery):
     if not sess.files:
         return await call.answer("Fayllar yo'q!", show_alert=True)
     await call.message.edit_text(
-        "🗑 <b>O'chirmoqchi bo'lgan faylingiz ustiga bosing:</b>",
+        "🗑 <b>Öçirmoqçi bölgan faylingiz ustiga bosing:</b>",
         reply_markup=get_files_manage_kb(sess),
         parse_mode="HTML"
     )
@@ -473,10 +473,10 @@ async def cb_del_single_file(call: CallbackQuery):
 
     if not sess.files:
         clear_session(call.from_user.id)
-        await call.message.edit_text("🧹 Ro'yxatda fayllar qolmadi. Sessiya tozalandi.")
+        await call.message.edit_text("🧹 Röyxatda fayllar qolmadi. Sessiya tozalandi.")
     else:
         await call.message.edit_text(
-            "🗑 <b>O'chirmoqchi bo'lgan faylingiz ustiga bosing:</b>",
+            "🗑 <b>Öçirmoqçi bölgan faylingiz ustiga bosing:</b>",
             reply_markup=get_files_manage_kb(sess),
             parse_mode="HTML"
         )
@@ -495,7 +495,7 @@ async def cb_back_to_main(call: CallbackQuery):
 @router.callback_query(F.data == "clear_all")
 async def cb_clear_all(call: CallbackQuery):
     clear_session(call.from_user.id)
-    await call.message.edit_text("🗑 Barcha yig'ilgan fayllar xotiradan o'chirildi.")
+    await call.message.edit_text("🗑 Barça yiğilgan fayllar xotiradan öçirildi.")
 
 
 # --------- ARXIVLASH JARAYONI (RAM / DISK + PROGRESS BAR + SPLIT) ---------
@@ -509,7 +509,7 @@ async def cb_start_zip(call: CallbackQuery):
     zip_filename = sess.archive_name or f"archive_{int(time.time())}.zip"
     progress_info = {"current": 0, "percent": 0, "done": False}
 
-    await call.message.edit_text("⏳ <b>Arxivlash boshlandi... 0%</b>", parse_mode="HTML")
+    await call.message.edit_text("⏳ <b>Arxivlaş boşlandi... 0%</b>", parse_mode="HTML")
 
     # Progress barni yangilab turuvchi asinxron vazifa
     async def progress_updater():
@@ -564,18 +564,18 @@ async def cb_start_zip(call: CallbackQuery):
             split_bytes = sess.split_size_mb * 1024 * 1024
 
             if sess.split_size_mb > 0 and final_size > split_bytes:
-                await call.message.edit_text("✂️ <b>Arxiv bo'laklarga bo'linmoqda...</b>", parse_mode="HTML")
+                await call.message.edit_text("✂️ <b>Arxiv bölaklarga bölinmoqda...</b>", parse_mode="HTML")
                 parts = await asyncio.to_thread(sync_split_file, out_zip_path, split_bytes)
                 out_zip_path.unlink(missing_ok=True)  # Asl katta faylni o'chiramiz
 
                 for idx, part_path in enumerate(parts, 1):
                     await call.message.edit_text(
-                        f"📤 <b>Bo'lak yuborilmoqda ({idx}/{len(parts)})...</b>",
+                        f"📤 <b>Bölak yuborilmoqda ({idx}/{len(parts)})...</b>",
                         parse_mode="HTML"
                     )
                     await call.message.answer_document(
                         document=FSInputFile(part_path),
-                        caption=f"🧩 Bo'lak {idx}/{len(parts)} ({format_size(part_path.stat().st_size)})"
+                        caption=f"🧩 Bölak {idx}/{len(parts)} ({format_size(part_path.stat().st_size)})"
                     )
             else:
                 await call.message.edit_text("📤 <b>Tayyor! Arxiv yuborilmoqda...</b>", parse_mode="HTML")

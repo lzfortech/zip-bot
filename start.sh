@@ -1,4 +1,20 @@
 #!/bin/bash
+#!/bin/bash
+
+# Agar API_ID yoki API_HASH kiritilmagan bo'lsa, logda aniq ko'rsatadi
+if [ -z "$API_ID" ] || [ -z "$API_HASH" ]; then
+  echo "XATOLIK: Render Environment bo'limida API_ID yoki API_HASH kiritilmagan!"
+  exit 1
+fi
+
+echo "Starting Local Telegram Bot API Server on port 8081..."
+/usr/local/bin/telegram-bot-api --local --api-id="$API_ID" --api-hash="$API_HASH" --http-port=8081 --dir=/tmp/tg-bot-api --temp-dir=/tmp/tg-bot-api-temp --verbosity=1 &
+
+# Local Bot API ko'tarilishini 4 soniya kutamiz
+sleep 4
+
+echo "Starting Python Aiogram ZIP Bot..."
+exec python3 bot.py
 
 echo "Starting Local Telegram Bot API Server on port 8081..."
 /usr/local/bin/telegram-bot-api \

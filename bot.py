@@ -287,7 +287,7 @@ async def cmd_start(message: Message, state: FSMContext):
         "• Ko'p fayllarni va albomlarni bitta ZIP ga yig'ish (500 MB gacha)\n"
         "• AES-256 kuchli parol bilan himoyalash\n"
         "• Siqish darajasini tanlash (Tezkor / Standart / Maksimal LZMA)\n"
-        "• Katta arxivlarni bo'laklarga (Split) bo'lish\n"
+        "• Katta arxivlarni bo'laklarga (Split) bo'lish\n\n"
         "📥 <i>Boshlash uchun menga istalgan fayl, rasm yoki video yuboring!</i>",
         parse_mode="HTML"
     )

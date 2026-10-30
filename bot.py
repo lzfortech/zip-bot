@@ -698,6 +698,10 @@ async def start_dummy_webserver():
 
 
 async def start_local_bot_api():
+    # Papkalar mavjud emas bo'lsa, oldindan yaratamiz
+    Path("/tmp/tg-bot-api").mkdir(parents=True, exist_ok=True)
+    Path("/tmp/tg-bot-api-temp").mkdir(parents=True, exist_ok=True)
+
     # API_ID va API_HASH ichidagi tasodifiy probel va qo'shtirnoqlarni tozalaymiz
     api_id = os.getenv("API_ID", "").strip().strip('"').strip("'")
     api_hash = os.getenv("API_HASH", "").strip().strip('"').strip("'")
@@ -733,7 +737,6 @@ async def start_local_bot_api():
 
     logger.info("✅ Local Bot API 8081-portda muvaffaqiyatli ishga tushdi!")
     return True
-
 
 async def main():
     # 1. Avval Render.com portini band qilamiz (No open ports xatosi chiqmasligi uchun)

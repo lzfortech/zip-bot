@@ -1,0 +1,3 @@
+aiogram>=3.13.0
+aiohttp>=3.10.0
+pyzipper>=0.3.6

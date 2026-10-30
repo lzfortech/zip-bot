@@ -284,7 +284,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(
         "👋 <b>Assalomu alaykum! Men professional ZIP Arxivator botman.</b>\n\n"
         "🚀 <b>Imkoniyatlarim:</b>\n"
-        "• Ko'p fayllarni va albomlarni bitta ZIP ga yig'ish (2 GB gacha)\n"
+        "• Ko'p fayllarni va albomlarni bitta ZIP ga yig'ish (500 MB gacha)\n"
         "• AES-256 kuchli parol bilan himoyalash\n"
         "• Siqish darajasini tanlash (Tezkor / Standart / Maksimal LZMA)\n"
         "• Katta arxivlarni bo'laklarga (Split) bo'lish\n"

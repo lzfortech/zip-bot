@@ -680,6 +680,8 @@ async def perform_unzip(msg: Message, user_id: int, zip_path: Path, password: Op
 
 
 # ================= RENDER.COM WEB SERVER & MAIN =================
+import subprocess
+
 async def health_check(request):
     return web.Response(text="OK - ZIP Bot & Local Bot API running!")
 
@@ -695,21 +697,71 @@ async def start_dummy_webserver():
     logger.info(f"Render Health-Check server {PORT}-portda ishga tushdi.")
 
 
+async def start_local_bot_api():
+    # API_ID va API_HASH ichidagi tasodifiy probel va qo'shtirnoqlarni tozalaymiz
+    api_id = os.getenv("API_ID", "").strip().strip('"').strip("'")
+    api_hash = os.getenv("API_HASH", "").strip().strip('"').strip("'")
+
+    if not api_id or not api_hash:
+        logger.error("❌ XATOLIK: Render Environment da API_ID yoki API_HASH topilmadi!")
+        return False
+
+    if not api_id.isdigit():
+        logger.error(f"❌ XATOLIK: API_ID faqat raqamlardan iborat bo'lishi kerak! Hozirgi qiymat: '{api_id}'")
+        return False
+
+    cmd = [
+        "/usr/local/bin/telegram-bot-api",
+        "--local",
+        f"--api-id={api_id}",
+        f"--api-hash={api_hash}",
+        "--http-port=8081",
+        "--dir=/tmp/tg-bot-api",
+        "--temp-dir=/tmp/tg-bot-api-temp",
+        "--verbosity=1"
+    ]
+
+    logger.info("Local Telegram Bot API server ishga tushirilmoqda...")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    # 3 soniya kutib, jarayon tirikligini tekshiramiz
+    await asyncio.sleep(3)
+    if proc.poll() is not None:
+        out, _ = proc.communicate()
+        logger.error(f"❌ Local Bot API to'xtab qoldi! Chiqqan xabar:\n{out[:500]}")
+        return False
+
+    logger.info("✅ Local Bot API 8081-portda muvaffaqiyatli ishga tushdi!")
+    return True
+
+
 async def main():
-    # 1. Render.com portini band qilish
+    # 1. Avval Render.com portini band qilamiz (No open ports xatosi chiqmasligi uchun)
     await start_dummy_webserver()
 
-    # 2. Local Bot API sessiyasini sozlash
-    local_server = TelegramAPIServer.from_base(LOCAL_API_URL, is_local=IS_LOCAL_FS)
-    session = AiohttpSession(api=local_server)
+    # 2. Local Bot API ni ishga tushiramiz
+    api_started = await start_local_bot_api()
 
-    bot = Bot(token=BOT_TOKEN, session=session)
+    if api_started:
+        local_server = TelegramAPIServer.from_base(LOCAL_API_URL, is_local=IS_LOCAL_FS)
+        session = AiohttpSession(api=local_server)
+        logger.info(f"Bot Local API ({LOCAL_API_URL}) rejimida ulanmoqda...")
+    else:
+        # Agar API_ID xato bo'lsa ham bot to'xtab qolmay, standart API da ishlab turadi
+        session = AiohttpSession()
+        logger.warning("⚠️ Local API yonmadi, bot vaqtincha Standart Telegram API rejimida ishga tushmoqda!")
+
+    bot = Bot(token=BOT_TOKEN.strip(), session=session)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
-    # Webhook qolib ketgan bo'lsa o'chiramiz va Polling boshlaymiz
-    await bot.delete_webhook(drop_pending_updates=True)
-    logger.info(f"Bot Local API ({LOCAL_API_URL}) orqali ishga tushdi!")
+    # Agar bot avval Standart API da ishlagan bo'lsa va Local API ga o'tayotgan bo'lsa
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logger.warning(f"Webhook o'chirishda ogohlantirish: {e}")
+
+    logger.info("🚀 Bot pollingni boshladi!")
     await dp.start_polling(bot)
 
 

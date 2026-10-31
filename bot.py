@@ -46,7 +46,7 @@ RAM_THRESHOLD_BYTES = 15 * 1024 * 1024  # 15 MB
 # Avto-backup boshqaruvi uchun global o'zgaruvchilar
 GLOBAL_BOT: Optional[Bot] = None
 BACKUP_PENDING: bool = False
- LAST_BACKUP_MSG_ID: Optional[int] = None
+LAST_BACKUP_MSG_ID: Optional[int] = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

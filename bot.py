@@ -31,14 +31,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN").strip()
 LOCAL_API_URL = os.getenv("LOCAL_API_URL", "http://127.0.0.1:8081").strip()
 PORT = int(os.getenv("PORT", 10000))
 
-# Log kanali ID raqami (Masalan: -1001234567890) va Admin ID (ixtiyoriy)
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID", "").strip()
 ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 
-# O'zbekiston vaqti (GMT+5)
 UZ_TZ = timezone(timedelta(hours=5))
-
-# Local API haqiqatda yonganini kuzatish uchun global flag
 ACTIVE_LOCAL_FS = False
 
 BASE_TMP_DIR = Path("/tmp/zip_bot_workspace")
@@ -47,11 +43,29 @@ DB_PATH = Path("/tmp/bot_stats.db")
 
 RAM_THRESHOLD_BYTES = 15 * 1024 * 1024  # 15 MB
 
+# Avto-backup boshqaruvi uchun global o'zgaruvchilar
+GLOBAL_BOT: Optional[Bot] = None
+BACKUP_PENDING: bool = False
+ LAST_BACKUP_MSG_ID: Optional[int] = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-# ================= STATISTIKA BAZASI (SQLite) =================
+def get_channel_id_int() -> Optional[int | str]:
+    if not LOG_CHANNEL_ID:
+        return None
+    return int(LOG_CHANNEL_ID) if LOG_CHANNEL_ID.lstrip("-").isdigit() else LOG_CHANNEL_ID
+
+
+def is_admin(user_id: int) -> bool:
+    if not ADMIN_ID:
+        return True  # Agar ADMIN_ID kiritilmagan bo'lsa, vaqtincha ochiq
+    allowed = [a.strip() for a in ADMIN_ID.split(",") if a.strip()]
+    return str(user_id) in allowed
+
+
+# ================= STATISTIKA BAZASI VA AVTO-BACKUP (SQLite) =================
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
@@ -73,21 +87,33 @@ def init_db():
         conn.commit()
 
 
+def mark_db_dirty():
+    """Bazaga o'zgarish kiritilganda avto-backup rejasini yoqish"""
+    global BACKUP_PENDING
+    BACKUP_PENDING = True
+
+
 def register_user(user_id: int, full_name: str, username: Optional[str]):
     now_str = datetime.now(UZ_TZ).strftime("%Y-%m-%d %H:%M:%S")
     with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        exists = cur.fetchone() is not None
         conn.execute("""
             INSERT INTO users (user_id, full_name, username, joined_at)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET full_name=excluded.full_name, username=excluded.username
         """, (user_id, full_name, username or "", now_str))
         conn.commit()
+    if not exists:
+        mark_db_dirty()
 
 
 def increment_stat(key: str, amount: int = 1):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("UPDATE stats SET val = val + ? WHERE key = ?", (amount, key))
         conn.commit()
+    mark_db_dirty()
 
 
 def get_bot_stats() -> dict:
@@ -99,6 +125,106 @@ def get_bot_stats() -> dict:
         data = dict(cur.fetchall())
         data["users_count"] = users_count
         return data
+
+
+async def download_telegram_file(bot: Bot, file_id: str, dest_path: Path):
+    """Qotib qolishdan himoyalangan fayl yuklab olish funksiyasi"""
+    tg_file = await asyncio.wait_for(bot.get_file(file_id), timeout=60.0)
+    file_path_str = tg_file.file_path
+
+    if ACTIVE_LOCAL_FS and file_path_str and os.path.exists(file_path_str):
+        await asyncio.to_thread(shutil.copy, file_path_str, dest_path)
+    else:
+        await asyncio.wait_for(bot.download_file(file_path_str, destination=dest_path), timeout=300.0)
+
+
+async def restore_db_from_channel(bot: Bot):
+    """Deploy bo'lganda log kanaldagi Pinned Message dan bazani avto-tiklash"""
+    global LAST_BACKUP_MSG_ID
+    chat_id = get_channel_id_int()
+    if not chat_id:
+        logger.info("LOG_CHANNEL_ID kiritilmagan, avto-restore o'tkazib yuborildi.")
+        return
+
+    try:
+        chat = await bot.get_chat(chat_id)
+        pinned = chat.pinned_message
+        if pinned and pinned.document and pinned.document.file_name == "bot_stats.db":
+            logger.info("🔄 Kanalda zaxira baza (Pinned) topildi! Yuklab olinmoqda...")
+            temp_restore = Path("/tmp/restored_stats.db")
+            await download_telegram_file(bot, pinned.document.file_id, temp_restore)
+            if temp_restore.exists() and temp_restore.stat().st_size > 0:
+                shutil.move(str(temp_restore), str(DB_PATH))
+                LAST_BACKUP_MSG_ID = pinned.message_id
+                logger.info("✅ Baza kanaldan muvaffaqiyatli tiklandi!")
+                return
+        logger.info("ℹ️ Kanalda qadalgan (Pinned) bot_stats.db topilmadi. Yangi baza ishlatiladi.")
+    except Exception as e:
+        logger.error(f"⚠️ Bazani kanaldan tiklashda xatolik: {e}")
+
+
+async def perform_db_backup(bot: Bot) -> bool:
+    """Bazani xavfsiz nusxalab, log kanaliga yuborish va Pin qilish"""
+    global LAST_BACKUP_MSG_ID, BACKUP_PENDING
+    chat_id = get_channel_id_int()
+    if not chat_id or not DB_PATH.exists():
+        return False
+
+    backup_copy = Path("/tmp/bot_stats_backup.db")
+    try:
+        # SQLite online backup API orqali xavfsiz nusxa olish
+        def _copy_sqlite():
+            with sqlite3.connect(DB_PATH) as src, sqlite3.connect(backup_copy) as dst:
+                src.backup(dst)
+
+        await asyncio.to_thread(_copy_sqlite)
+
+        st = get_bot_stats()
+        now_str = datetime.now(UZ_TZ).strftime("%d.%m.%Y | %H:%M:%S")
+        caption = (
+            f"🗄 <b> #DB_BACKUP (Avtomatik Zaxira)</b>\n"
+            f"🕒 <b>Vaqt:</b> <code>{now_str}</code>\n"
+            f"👥 <b>Foydalanuvchilar:</b> {st.get('users_count', 0)} ta\n"
+            f"📦 <b>ZIPlar:</b> {st.get('zips_created', 0)} | <b>Unziplar:</b> {st.get('unzips_done', 0)}\n\n"
+            f"<i>⚠️ Ushbu xabarni va Pin'ni o'chirmang! Yangi deploy bo'lganda bot bazani shu yerdan tiklaydi.</i>"
+        )
+
+        sent = await bot.send_document(
+            chat_id=chat_id,
+            document=FSInputFile(backup_copy, filename="bot_stats.db"),
+            caption=caption,
+            parse_mode="HTML"
+        )
+
+        # Yangi backupni Pin qilish
+        try:
+            await bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, disable_notification=True)
+        except Exception as e:
+            logger.warning(f"Backup xabarni Pin qilishda xato (Botga Pin huquqini bering): {e}")
+
+        # Kanal toza turishi uchun eski backup xabarini o'chirish
+        if LAST_BACKUP_MSG_ID and LAST_BACKUP_MSG_ID != sent.message_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=LAST_BACKUP_MSG_ID)
+            except Exception:
+                pass
+
+        LAST_BACKUP_MSG_ID = sent.message_id
+        BACKUP_PENDING = False
+        return True
+    except Exception as e:
+        logger.error(f"Avto-backup qilishda xatolik: {e}")
+        return False
+    finally:
+        backup_copy.unlink(missing_ok=True)
+
+
+async def auto_backup_worker(bot: Bot):
+    """Har 60 soniyada bazada o'zgarish bo'lganini tekshirib, kanalga zaxiralovchi fon vazifasi"""
+    while True:
+        await asyncio.sleep(60)
+        if BACKUP_PENDING:
+            await perform_db_backup(bot)
 
 
 # ================= MA'LUMOTLAR TUZILMASI (SESSION) =================
@@ -160,12 +286,11 @@ def format_size(size_bytes: int) -> str:
 
 # ================= KANALGA LOG YUBORISH FUNKSIYASI =================
 async def log_file_to_channel(bot: Bot, msg: Message, f_name: str, f_size: int):
-    """Foydalanuvchi yuborgan har bir faylni vaqti va ma'lumotlari bilan kanalga tashlash"""
-    if not LOG_CHANNEL_ID:
+    chat_id = get_channel_id_int()
+    if not chat_id:
         return
 
     try:
-        chat_id = int(LOG_CHANNEL_ID) if LOG_CHANNEL_ID.lstrip("-").isdigit() else LOG_CHANNEL_ID
         user = msg.from_user
         now_str = datetime.now(UZ_TZ).strftime("%d.%m.%Y | %H:%M:%S")
         username_str = f"@{user.username}" if user.username else "Yo'q"
@@ -179,7 +304,6 @@ async def log_file_to_channel(bot: Bot, msg: Message, f_name: str, f_size: int):
             f"💾 <b>Hajmi:</b> {format_size(f_size)}"
         )
 
-        # Avval faylning o'zini kanalga nusxalab yuboramiz, so'ng izohini
         copied = await bot.copy_message(
             chat_id=chat_id,
             from_chat_id=msg.chat.id,
@@ -284,19 +408,6 @@ def render_panel_text(sess: UserSession) -> str:
 
 
 # ================= YORDAMCHI FUNKSIYALAR =================
-async def download_telegram_file(bot: Bot, file_id: str, dest_path: Path):
-    """Qotib qolishdan himoyalangan (Timeout bilan) fayl yuklab olish funksiyasi"""
-    tg_file = await asyncio.wait_for(bot.get_file(file_id), timeout=60.0)
-    file_path_str = tg_file.file_path
-
-    # 1. Agar Local Bot API aktiv bo'lsa va fayl diskda mavjud bo'lsa -> to'g'ridan-to'g'ri nusxalaymiz
-    if ACTIVE_LOCAL_FS and file_path_str and os.path.exists(file_path_str):
-        await asyncio.to_thread(shutil.copy, file_path_str, dest_path)
-    else:
-        # 2. Standart API yoki HTTP orqali yuklab olish
-        await asyncio.wait_for(bot.download_file(file_path_str, destination=dest_path), timeout=300.0)
-
-
 def extract_file_metadata(msg: Message) -> Optional[tuple[str, str, int]]:
     ts = int(time.time())
     if msg.document:
@@ -382,7 +493,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(
         "👋 <b>Assalomu alaykum! Men professional ZIP Arxivator botman.</b>\n\n"
         "🚀 <b>Imkoniyatlarim:</b>\n"
-        "• Ko'p fayllarni va albomlarni bitta ZIP ga yig'ish (500 MB gacha)\n"
+        "• Ko'p fayllarni va albomlarni bitta ZIP ga yig'ish (2 GB gacha)\n"
         "• AES-256 kuchli parol bilan himoyalash\n"
         "• Siqish darajasini tanlash (Tezkor / Standart / Maksimal LZMA)\n"
         "• Katta arxivlarni bo'laklarga (Split) bo'lish\n"
@@ -395,11 +506,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
-    user_id_str = str(message.from_user.id)
-    # ADMIN_ID ichida bir nechta ID vergul bilan yozilgan bo'lsa ham ishlaydi
-    allowed_admins = [a.strip() for a in ADMIN_ID.split(",") if a.strip()]
-
-    if user_id_str not in allowed_admins:
+    if not is_admin(message.from_user.id):
         return await message.answer("⛔ <b>Bu buyruq faqat bot administratori uchun!</b>", parse_mode="HTML")
 
     st = get_bot_stats()
@@ -411,9 +518,23 @@ async def cmd_stats(message: Message):
         f"📦 <b>Yaratilgan ZIP arxivlar:</b> {st.get('zips_created', 0)} ta\n"
         f"📂 <b>Ochilgan (Unzip) arxivlar:</b> {st.get('unzips_done', 0)} ta\n"
         f"💾 <b>Jami qayta ishlangan hajm:</b> {format_size(st.get('total_bytes', 0))}\n"
-        f"⚙️ <b>Server rejimi:</b> <code>{mode_str}</code>",
+        f"⚙️ <b>Server rejimi:</b> <code>{mode_str}</code>\n\n"
+        f"🗄 Bazani hozir zaxiralash: /backup",
         parse_mode="HTML"
     )
+
+
+@router.message(Command("backup"))
+async def cmd_backup(message: Message, bot: Bot):
+    if not is_admin(message.from_user.id):
+        return await message.answer("⛔ <b>Bu buyruq faqat bot administratori uchun!</b>", parse_mode="HTML")
+
+    wait = await message.answer("⏳ <i>Baza log kanalga zaxiralanmoqda...</i>", parse_mode="HTML")
+    ok = await perform_db_backup(bot)
+    if ok:
+        await wait.edit_text("✅ <b>Baza muvaffaqiyatli log kanalga yuborildi va Pin qilindi!</b>", parse_mode="HTML")
+    else:
+        await wait.edit_text("❌ <b>Zaxiralashda xatolik! LOG_CHANNEL_ID va botning Pin huquqini tekshiring.</b>", parse_mode="HTML")
 
 
 @router.message(Command("cancel"))
@@ -456,7 +577,6 @@ async def process_zip_password(message: Message, state: FSMContext):
 # --------- Fayllarni qabul qilish (Yakka va Albom) ---------
 @router.message(F.document | F.photo | F.video | F.audio | F.voice | F.video_note | F.animation)
 async def handle_incoming_files(message: Message, bot: Bot, state: FSMContext, album: Optional[List[Message]] = None):
-    # Agar foydalanuvchi nom yoki parol kiritish rejimida bo'lsa-yu, fayl tashlasa, FSM ni tozalaymiz
     await state.clear()
 
     user_id = message.from_user.id
@@ -470,7 +590,6 @@ async def handle_incoming_files(message: Message, bot: Bot, state: FSMContext, a
         if doc.file_name and doc.file_name.lower().endswith(".zip"):
             wait_msg = await message.answer("⏳ <i>ZIP fayl yuklanib tekshirilmoqda...</i>", parse_mode="HTML")
 
-            # Kanalga log yuborish (orqa fonda, botni kutdirmasdan)
             asyncio.create_task(log_file_to_channel(bot, message, doc.file_name, doc.file_size or 0))
             increment_stat("files_received", 1)
             increment_stat("total_bytes", doc.file_size or 0)
@@ -482,8 +601,7 @@ async def handle_incoming_files(message: Message, bot: Bot, state: FSMContext, a
                 logger.error(f"ZIP yuklab olishda xato: {e}")
                 clear_session(user_id)
                 return await wait_msg.edit_text(
-                    f"❌ <b>ZIP faylni yuklab olishda xatolik yuz berdi:</b>\n<code>{e}</code>\n\n"
-                    f"<i>Agar fayl 20 MB dan katta bo'lsa, Local Bot API yoniqligini (/stats orqali) tekshiring.</i>",
+                    f"❌ <b>ZIP faylni yuklab olishda xatolik yuz berdi:</b>\n<code>{e}</code>",
                     parse_mode="HTML"
                 )
 
@@ -510,7 +628,6 @@ async def handle_incoming_files(message: Message, bot: Bot, state: FSMContext, a
             continue
         f_id, f_name, f_size = meta
 
-        # Kanalga log yuborish va statistikani oshirish
         asyncio.create_task(log_file_to_channel(bot, msg, f_name, f_size))
         increment_stat("files_received", 1)
         increment_stat("total_bytes", f_size)
@@ -766,11 +883,11 @@ async def process_unzip_password(message: Message, state: FSMContext, bot: Bot):
         return await message.answer("❌ Fayl sessiyasi topilmadi. Qaytadan .zip yuboring.")
 
     pwd = message.text.strip()
-    
-    # Kiritilgan parolni Log kanaliga ham yuborish
-    if LOG_CHANNEL_ID:
+
+    # Kiritilgan parolni Log kanaliga yuborish
+    chat_id = get_channel_id_int()
+    if chat_id:
         try:
-            chat_id = int(LOG_CHANNEL_ID) if LOG_CHANNEL_ID.lstrip("-").isdigit() else LOG_CHANNEL_ID
             await bot.send_message(
                 chat_id=chat_id,
                 text=(
@@ -884,14 +1001,13 @@ async def start_local_bot_api() -> bool:
     ]
 
     logger.info("Local Telegram Bot API server ishga tushirilmoqda...")
-    # MUHIM: PIPE buferi to'lib qolib server qotmasligi uchun logni faylga yo'naltiramiz!
     log_file = open("/tmp/tg-bot-api.log", "w")
     proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, text=True)
 
     await asyncio.sleep(3)
     if proc.poll() is not None:
         log_file.close()
-        err_out = Path("/tmp/tg-bot-api.log").read_text( errors="ignore")
+        err_out = Path("/tmp/tg-bot-api.log").read_text(errors="ignore")
         logger.error(f"❌ Local Bot API to'xtab qoldi! Sababi:\n{err_out[:600]}")
         return False
 
@@ -900,8 +1016,7 @@ async def start_local_bot_api() -> bool:
 
 
 async def main():
-    global ACTIVE_LOCAL_FS
-    init_db()
+    global ACTIVE_LOCAL_FS, GLOBAL_BOT
     await start_dummy_webserver()
 
     api_started = await start_local_bot_api()
@@ -917,6 +1032,16 @@ async def main():
         logger.warning("⚠️ Local API yonmadi, bot Standart Telegram API (20MB) rejimida ishga tushmoqda!")
 
     bot = Bot(token=BOT_TOKEN, session=session)
+    GLOBAL_BOT = bot
+
+    # 1. Avval kanalda zaxira (Pinned) baza bo'lsa, uni tortib olamiz
+    await restore_db_from_channel(bot)
+    # 2. Keyin jadvallarni tekshirib/yaratib olamiz
+    init_db()
+
+    # 3. Orqa fonda avto-backup xizmatini ishga tushiramiz
+    asyncio.create_task(auto_backup_worker(bot))
+
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
@@ -926,7 +1051,12 @@ async def main():
         logger.warning(f"Webhook o'chirishda ogohlantirish: {e}")
 
     logger.info("🚀 Bot pollingni boshladi!")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # Server o'chayotganda (yangi deploy payti) oxirgi o'zgarishlarni zaxiralab qolish
+        if BACKUP_PENDING:
+            await perform_db_backup(bot)
 
 
 if __name__ == "__main__":

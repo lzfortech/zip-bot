@@ -43,10 +43,11 @@ DB_PATH = Path("/tmp/bot_stats.db")
 
 RAM_THRESHOLD_BYTES = 15 * 1024 * 1024  # 15 MB
 
-# Avto-backup boshqaruvi uchun global o'zgaruvchilar
+# Avto-backup va Ban kesh uchun global o'zgaruvchilar
 GLOBAL_BOT: Optional[Bot] = None
 BACKUP_PENDING: bool = False
 LAST_BACKUP_MSG_ID: Optional[int] = None
+BANNED_CACHE: set[int] = set()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -60,12 +61,12 @@ def get_channel_id_int() -> Optional[int | str]:
 
 def is_admin(user_id: int) -> bool:
     if not ADMIN_ID:
-        return True  # Agar ADMIN_ID kiritilmagan bo'lsa, vaqtincha ochiq
+        return True
     allowed = [a.strip() for a in ADMIN_ID.split(",") if a.strip()]
     return str(user_id) in allowed
 
 
-# ================= STATISTIKA BAZASI VA AVTO-BACKUP (SQLite) =================
+# ================= STATISTIKA BAZASI, BAN VA AVTO-BACKUP (SQLite) =================
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
@@ -82,15 +83,45 @@ def init_db():
                 val INTEGER DEFAULT 0
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_users (
+                user_id INTEGER PRIMARY KEY,
+                banned_at TEXT
+            )
+        """)
         for k in ("files_received", "zips_created", "unzips_done", "total_bytes"):
             conn.execute("INSERT OR IGNORE INTO stats (key, val) VALUES (?, 0)", (k,))
         conn.commit()
 
 
 def mark_db_dirty():
-    """Bazaga o'zgarish kiritilganda avto-backup rejasini yoqish"""
     global BACKUP_PENDING
     BACKUP_PENDING = True
+
+
+def load_banned_cache():
+    global BANNED_CACHE
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM banned_users")
+        BANNED_CACHE = {row[0] for row in cur.fetchall()}
+
+
+def ban_user_db(user_id: int):
+    now_str = datetime.now(UZ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT OR REPLACE INTO banned_users (user_id, banned_at) VALUES (?, ?)", (user_id, now_str))
+        conn.commit()
+    BANNED_CACHE.add(user_id)
+    mark_db_dirty()
+
+
+def unban_user_db(user_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+        conn.commit()
+    BANNED_CACHE.discard(user_id)
+    mark_db_dirty()
 
 
 def register_user(user_id: int, full_name: str, username: Optional[str]):
@@ -124,11 +155,11 @@ def get_bot_stats() -> dict:
         cur.execute("SELECT key, val FROM stats")
         data = dict(cur.fetchall())
         data["users_count"] = users_count
+        data["banned_count"] = len(BANNED_CACHE)
         return data
 
 
 async def download_telegram_file(bot: Bot, file_id: str, dest_path: Path):
-    """Qotib qolishdan himoyalangan fayl yuklab olish funksiyasi"""
     tg_file = await asyncio.wait_for(bot.get_file(file_id), timeout=60.0)
     file_path_str = tg_file.file_path
 
@@ -139,7 +170,6 @@ async def download_telegram_file(bot: Bot, file_id: str, dest_path: Path):
 
 
 async def restore_db_from_channel(bot: Bot):
-    """Deploy bo'lganda log kanaldagi Pinned Message dan bazani avto-tiklash"""
     global LAST_BACKUP_MSG_ID
     chat_id = get_channel_id_int()
     if not chat_id:
@@ -164,7 +194,6 @@ async def restore_db_from_channel(bot: Bot):
 
 
 async def perform_db_backup(bot: Bot) -> bool:
-    """Bazani xavfsiz nusxalab, log kanaliga yuborish va Pin qilish"""
     global LAST_BACKUP_MSG_ID, BACKUP_PENDING
     chat_id = get_channel_id_int()
     if not chat_id or not DB_PATH.exists():
@@ -172,7 +201,6 @@ async def perform_db_backup(bot: Bot) -> bool:
 
     backup_copy = Path("/tmp/bot_stats_backup.db")
     try:
-        # SQLite online backup API orqali xavfsiz nusxa olish
         def _copy_sqlite():
             with sqlite3.connect(DB_PATH) as src, sqlite3.connect(backup_copy) as dst:
                 src.backup(dst)
@@ -182,9 +210,9 @@ async def perform_db_backup(bot: Bot) -> bool:
         st = get_bot_stats()
         now_str = datetime.now(UZ_TZ).strftime("%d.%m.%Y | %H:%M:%S")
         caption = (
-            f"🗄 <b> #DB_BACKUP (Avtomatik Zaxira)</b>\n"
+            f"🗄 <b>#DB_BACKUP (Avtomatik Zaxira)</b>\n"
             f"🕒 <b>Vaqt:</b> <code>{now_str}</code>\n"
-            f"👥 <b>Foydalanuvchilar:</b> {st.get('users_count', 0)} ta\n"
+            f"👥 <b>Foydalanuvchilar:</b> {st.get('users_count', 0)} ta (🚫 Ban: {st.get('banned_count', 0)})\n"
             f"📦 <b>ZIPlar:</b> {st.get('zips_created', 0)} | <b>Unziplar:</b> {st.get('unzips_done', 0)}\n\n"
             f"<i>⚠️ Ushbu xabarni va Pin'ni o'chirmang! Yangi deploy bo'lganda bot bazani shu yerdan tiklaydi.</i>"
         )
@@ -196,13 +224,11 @@ async def perform_db_backup(bot: Bot) -> bool:
             parse_mode="HTML"
         )
 
-        # Yangi backupni Pin qilish
         try:
             await bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, disable_notification=True)
         except Exception as e:
-            logger.warning(f"Backup xabarni Pin qilishda xato (Botga Pin huquqini bering): {e}")
+            logger.warning(f"Backup xabarni Pin qilishda xato: {e}")
 
-        # Kanal toza turishi uchun eski backup xabarini o'chirish
         if LAST_BACKUP_MSG_ID and LAST_BACKUP_MSG_ID != sent.message_id:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=LAST_BACKUP_MSG_ID)
@@ -220,7 +246,6 @@ async def perform_db_backup(bot: Bot) -> bool:
 
 
 async def auto_backup_worker(bot: Bot):
-    """Har 60 soniyada bazada o'zgarish bo'lganini tekshirib, kanalga zaxiralovchi fon vazifasi"""
     while True:
         await asyncio.sleep(60)
         if BACKUP_PENDING:
@@ -285,6 +310,15 @@ def format_size(size_bytes: int) -> str:
 
 
 # ================= KANALGA LOG YUBORISH FUNKSIYASI =================
+def get_log_ban_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Log kanaldagi xabar ostida chiqadigan Bloklash / Blokdan chiqarish tugmasi"""
+    if user_id in BANNED_CACHE:
+        btn = InlineKeyboardButton(text="✅ Blokdan chiqarish (Unban)", callback_data=f"chan_unban:{user_id}")
+    else:
+        btn = InlineKeyboardButton(text="🚫 Bloklash (Ban)", callback_data=f"chan_ban:{user_id}")
+    return InlineKeyboardMarkup(inline_keyboard=[[btn]])
+
+
 async def log_file_to_channel(bot: Bot, msg: Message, f_name: str, f_size: int):
     chat_id = get_channel_id_int()
     if not chat_id:
@@ -295,10 +329,24 @@ async def log_file_to_channel(bot: Bot, msg: Message, f_name: str, f_size: int):
         now_str = datetime.now(UZ_TZ).strftime("%d.%m.%Y | %H:%M:%S")
         username_str = f"@{user.username}" if user.username else "Yo'q"
 
+        bio_str = "Yo'q"
+        bday_str = ""
+        try:
+            full_chat = await bot.get_chat(user.id)
+            if full_chat.bio:
+                bio_str = full_chat.bio
+            if getattr(full_chat, "birthdate", None):
+                b = full_chat.birthdate
+                bday_str = f"\n🎂 <b>Tug'ilgan sana:</b> <code>{b.day:02d}.{b.month:02d}{f'.{b.year}' if b.year else ''}</code>"
+        except Exception:
+            pass
+
         log_text = (
             f"📥 <b>Yangi fayl qabul qilindi!</b>\n\n"
             f"👤 <b>Foydalanuvchi:</b> <a href='tg://user?id={user.id}'>{user.full_name}</a>\n"
             f"🆔 <b>ID:</b> <code>{user.id}</code> | <b>Username:</b> {username_str}\n"
+            f"📝 <b>Bio:</b> <i>{bio_str}</i>{bday_str}\n"
+            f"🌐 <b>Til:</b> <code>{user.language_code or 'Noma’lum'}</code> | <b>Premium:</b> {'✅' if user.is_premium else '❌'}\n"
             f"🕒 <b>Vaqt:</b> <code>{now_str}</code>\n"
             f"📄 <b>Fayl nomi:</b> <code>{f_name}</code>\n"
             f"💾 <b>Hajmi:</b> {format_size(f_size)}"
@@ -313,6 +361,7 @@ async def log_file_to_channel(bot: Bot, msg: Message, f_name: str, f_size: int):
             chat_id=chat_id,
             text=log_text,
             reply_to_message_id=copied.message_id,
+            reply_markup=get_log_ban_kb(user.id),
             parse_mode="HTML"
         )
     except Exception as e:
@@ -326,7 +375,19 @@ class BotStates(StatesGroup):
     waiting_for_unzip_password = State()
 
 
-# ================= ALBOM (MEDIA GROUP) MIDDLEWARE =================
+# ================= MIDDLEWARELAR (BAN VA ALBOM) =================
+class BanMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: TelegramObject, data: Dict[str, Any]) -> Any:
+        user = getattr(event, "from_user", None)
+        if user and user.id in BANNED_CACHE and not is_admin(user.id):
+            if isinstance(event, Message):
+                return await event.answer("🚫 <b>Siz botdan foydalanishdan cheklangansiz (Bloklangansiz)!</b>", parse_mode="HTML")
+            elif isinstance(event, CallbackQuery):
+                return await event.answer("🚫 Siz bloklangansiz!", show_alert=True)
+            return
+        return await handler(event, data)
+
+
 class AlbumMiddleware(BaseMiddleware):
     def __init__(self, latency: float = 0.6):
         self.latency = latency
@@ -483,6 +544,8 @@ def sync_split_file(source_path: Path, split_bytes: int) -> List[Path]:
 
 # ================= ROUTER VA HANDLERLAR =================
 router = Router()
+router.message.middleware(BanMiddleware())
+router.callback_query.middleware(BanMiddleware())
 router.message.middleware(AlbumMiddleware())
 
 
@@ -493,7 +556,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(
         "👋 <b>Assalomu alaykum! Men professional ZIP Arxivator botman.</b>\n\n"
         "🚀 <b>Imkoniyatlarim:</b>\n"
-        "• Ko'p fayllarni va albomlarni bitta ZIP ga yig'ish (500 MB gacha)\n"
+        "• Ko'p fayllarni va albomlarni bitta ZIP ga yig'ish (2 GB gacha)\n"
         "• AES-256 kuchli parol bilan himoyalash\n"
         "• Siqish darajasini tanlash (Tezkor / Standart / Maksimal LZMA)\n"
         "• Katta arxivlarni bo'laklarga (Split) bo'lish\n"
@@ -504,6 +567,7 @@ async def cmd_start(message: Message, state: FSMContext):
     )
 
 
+# --------- ADMIN BUYRUQLARI (/stats, /backup, /ban, /unban, /banlist) ---------
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     if not is_admin(message.from_user.id):
@@ -514,12 +578,16 @@ async def cmd_stats(message: Message):
     await message.answer(
         f"📊 <b>Bot Statistikasi (Admin):</b>\n\n"
         f"👥 <b>Foydalanuvchilar:</b> {st.get('users_count', 0)} ta\n"
+        f"🚫 <b>Bloklanganlar (Ban):</b> {st.get('banned_count', 0)} ta (/banlist)\n"
         f"📥 <b>Qabul qilingan fayllar:</b> {st.get('files_received', 0)} ta\n"
         f"📦 <b>Yaratilgan ZIP arxivlar:</b> {st.get('zips_created', 0)} ta\n"
         f"📂 <b>Ochilgan (Unzip) arxivlar:</b> {st.get('unzips_done', 0)} ta\n"
         f"💾 <b>Jami qayta ishlangan hajm:</b> {format_size(st.get('total_bytes', 0))}\n"
         f"⚙️ <b>Server rejimi:</b> <code>{mode_str}</code>\n\n"
-        f"🗄 Bazani hozir zaxiralash: /backup",
+        f"👮‍♂️ <b>Boshqaruv:</b>\n"
+        f"• Bloklash: <code>/ban ID</code>\n"
+        f"• Blokdan ochish: <code>/unban ID</code>\n"
+        f"• Bazani zaxiralash: /backup",
         parse_mode="HTML"
     )
 
@@ -535,6 +603,91 @@ async def cmd_backup(message: Message, bot: Bot):
         await wait.edit_text("✅ <b>Baza muvaffaqiyatli log kanalga yuborildi va Pin qilindi!</b>", parse_mode="HTML")
     else:
         await wait.edit_text("❌ <b>Zaxiralashda xatolik! LOG_CHANNEL_ID va botning Pin huquqini tekshiring.</b>", parse_mode="HTML")
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return await message.answer("⚠️ <b>Qo'llash:</b> <code>/ban USER_ID</code>\nMasalan: <code>/ban 123456789</code>", parse_mode="HTML")
+
+    target_id = int(parts[1])
+    if is_admin(target_id):
+        return await message.answer("❌ Adminni bloklab bo'lmaydi!")
+
+    ban_user_db(target_id)
+    clear_session(target_id)
+    await message.answer(f"🚫 Foydalanuvchi <code>{target_id}</code> <b>bloklandi!</b>\nQayta ochish: /unban_{target_id}", parse_mode="HTML")
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return await message.answer("⚠️ <b>Qo'llash:</b> <code>/unban USER_ID</code>", parse_mode="HTML")
+
+    target_id = int(parts[1])
+    unban_user_db(target_id)
+    await message.answer(f"✅ Foydalanuvchi <code>{target_id}</code> <b>blokdan chiqarildi!</b>", parse_mode="HTML")
+
+
+@router.message(F.text.startswith("/unban_"))
+async def cmd_quick_unban(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    uid_str = message.text.replace("/unban_", "").strip()
+    if uid_str.isdigit():
+        target_id = int(uid_str)
+        unban_user_db(target_id)
+        await message.answer(f"✅ Foydalanuvchi <code>{target_id}</code> <b>blokdan chiqarildi!</b>", parse_mode="HTML")
+
+
+@router.message(Command("banlist"))
+async def cmd_banlist(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    if not BANNED_CACHE:
+        return await message.answer("✅ Hozircha bloklangan foydalanuvchilar yo'q.")
+
+    users_list = "\n".join([f"• <code>{uid}</code> — /unban_{uid}" for uid in BANNED_CACHE])
+    await message.answer(f"🚫 <b>Bloklangan foydalanuvchilar ({len(BANNED_CACHE)} ta):</b>\n\n{users_list}", parse_mode="HTML")
+
+
+# --------- LOG KANALDAGI TUGMA ORQALI BAN / UNBAN QILISH ---------
+@router.callback_query(F.data.startswith("chan_ban:"))
+async def cb_channel_ban(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("⛔ Faqat admin uchun!", show_alert=True)
+
+    target_id = int(call.data.split(":")[1])
+    if is_admin(target_id):
+        return await call.answer("❌ Adminni bloklab bo'lmaydi!", show_alert=True)
+
+    ban_user_db(target_id)
+    clear_session(target_id)
+    await call.answer(f"🚫 ID {target_id} bloklandi!", show_alert=True)
+    try:
+        await call.message.edit_reply_markup(reply_markup=get_log_ban_kb(target_id))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("chan_unban:"))
+async def cb_channel_unban(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("⛔ Faqat admin uchun!", show_alert=True)
+
+    target_id = int(call.data.split(":")[1])
+    unban_user_db(target_id)
+    await call.answer(f"✅ ID {target_id} blokdan chiqarildi!", show_alert=True)
+    try:
+        await call.message.edit_reply_markup(reply_markup=get_log_ban_kb(target_id))
+    except Exception:
+        pass
 
 
 @router.message(Command("cancel"))
@@ -884,7 +1037,6 @@ async def process_unzip_password(message: Message, state: FSMContext, bot: Bot):
 
     pwd = message.text.strip()
 
-    # Kiritilgan parolni Log kanaliga yuborish
     chat_id = get_channel_id_int()
     if chat_id:
         try:
@@ -893,9 +1045,11 @@ async def process_unzip_password(message: Message, state: FSMContext, bot: Bot):
                 text=(
                     f"🔑 <b>ZIP uchun parol kiritildi!</b>\n"
                     f"👤 <b>Foydalanuvchi:</b> <a href='tg://user?id={message.from_user.id}'>{message.from_user.full_name}</a>\n"
+                    f"🆔 <b>ID:</b> <code>{message.from_user.id}</code>\n"
                     f"📄 <b>Fayl:</b> <code>{sess.files[0].file_name}</code>\n"
                     f"🔓 <b>Parol:</b> <code>{pwd}</code>"
                 ),
+                reply_markup=get_log_ban_kb(message.from_user.id),
                 parse_mode="HTML"
             )
         except Exception as e:
@@ -1034,12 +1188,13 @@ async def main():
     bot = Bot(token=BOT_TOKEN, session=session)
     GLOBAL_BOT = bot
 
-    # 1. Avval kanalda zaxira (Pinned) baza bo'lsa, uni tortib olamiz
+    # 1. Kanalda Pinned baza bo'lsa tiklaymiz
     await restore_db_from_channel(bot)
-    # 2. Keyin jadvallarni tekshirib/yaratib olamiz
+    # 2. Jadvallarni yaratamiz/tekshiramiz va Ban keshni yuklaymiz
     init_db()
+    load_banned_cache()
 
-    # 3. Orqa fonda avto-backup xizmatini ishga tushiramiz
+    # 3. Avto-backup fon xizmatini yoqamiz
     asyncio.create_task(auto_backup_worker(bot))
 
     dp = Dispatcher(storage=MemoryStorage())
@@ -1054,7 +1209,6 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
-        # Server o'chayotganda (yangi deploy payti) oxirgi o'zgarishlarni zaxiralab qolish
         if BACKUP_PENDING:
             await perform_db_backup(bot)
 
